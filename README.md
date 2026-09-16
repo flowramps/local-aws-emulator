@@ -4,7 +4,11 @@ Ambiente de estudo para simular cenários de EC2, RDS, EKS e IAM localmente, usa
 
 > **Já tem Docker, AWS CLI e kubectl?** Pule para `make lab` — sobe o emulador e provisiona o estudo de caso inteiro (KMS, IAM, VPC 3 AZs, EC2, RDS, EKS, S3 + API Gateway), validando tudo em ~3 min. Depois, `make open` abre a aplicação. `make help` lista os alvos.
 >
-> A arquitetura, o diagrama e o passo a passo manual estão em [`fluxo-de-construcao.md`](fluxo-de-construcao.md).
+> A arquitetura, os diagramas e o passo a passo manual estão em [`fluxo-de-construcao.md`](fluxo-de-construcao.md).
+
+![Arquitetura do Shield na AWS](docs/arquitetura.png)
+
+> Fontes em `docs/*.mmd`; `make diagram` regenera os PNGs.
 >
 > As seções 1 a 3 abaixo são o setup de máquina (WSL2 + Docker), feito uma vez só.
 
@@ -239,6 +243,7 @@ A lista completa, com as divergências de API Gateway, EKS e KMS observadas nos 
 compose.yaml            # emulador (:4566) + console web (:4500)
 env.sh                  # exports do AWS CLI apontando para o emulador
 Makefile                # atalhos: make lab / open / test / clean
+docs/                   # diagramas: fontes .mmd + PNGs (make diagram)
 frontend/               # o SPA do Shield publicado no bucket S3
 scripts/
   lab.sh                # orquestrador dos alvos do Makefile

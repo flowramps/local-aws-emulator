@@ -1,0 +1,27 @@
+sequenceDiagram
+    autonumber
+    participant U as 👤 Navegador
+    participant G as API Gateway<br/>(stage prd)
+    participant R as IAM<br/>role-prd-shield-apigw-s3
+    participant S as S3<br/>bucket privado
+    participant N as Ingress (EKS)
+    participant A as shield-api<br/>(PostgREST)
+    participant D as RDS Postgres
+
+    U->>G: GET /
+    G->>R: sts:AssumeRole
+    R-->>G: credencial temporária
+    G->>S: GET index.html (SigV4 + kms:Decrypt)
+    S-->>G: HTML (decifrado com a CMK)
+    G-->>U: 200 · painel do Shield
+
+    Note over U: a página executa fetch('api/transacoes')
+
+    U->>G: GET /api/transacoes
+    G->>N: encaminha para o NodePort do cluster
+    N->>A: /transacoes (prefixo /api removido)
+    A->>D: SELECT ... FROM api.transacoes
+    Note right of D: conexão aceita só porque a origem<br/>é o SG do EKS — não há regra por CIDR
+    D-->>A: linhas
+    A-->>G: JSON
+    G-->>U: 200 · tabela renderizada

@@ -25,70 +25,60 @@ make open    # abre o painel do Shield no navegador
 
 ## Arquitetura
 
+![Arquitetura do Shield na AWS](docs/arquitetura.png)
+
+<details><summary>fonte mermaid do diagrama</summary>
+
 ```mermaid
-flowchart TB
+flowchart LR
     user(["👤 Navegador"])
 
-    subgraph aws["☁️ AWS · us-east-1 · conta 000000000000"]
-        direction TB
+    subgraph aws["☁️  AWS · us-east-1 · conta 000000000000"]
 
         subgraph edge["Borda — fora da VPC"]
-            apigw["**API Gateway** REST<br/>api-prd-shield-us · stage prd"]
-            s3[("**S3** shield-prd-frontend-us-east-1<br/>privado · SSE-KMS · versionado<br/>Block Public Access ✓")]
+            apigw["<b>API Gateway</b> REST · stage prd<br/>api-prd-shield-us<br/>GET / · ANY /api/{proxy+} · ANY /{proxy+}"]
+            s3[("<b>S3</b> shield-prd-frontend-us-east-1<br/>privado · ACL private · versionado<br/>SSE-KMS prd-shield-s3 · BPA 4/4")]
         end
 
-        subgraph vpc["**VPC** vpc-prd-shield-us · 10.20.0.0/16"]
-            direction TB
+        subgraph vpc["<b>VPC</b> vpc-prd-shield-us · 10.20.0.0/16 · 3 AZs"]
 
-            subgraph pub["🌐 Camada pública · 10.20.0-2.0/24 · 3 AZs"]
-                igw["Internet Gateway"]
+            subgraph pub["🌐 Pública · 10.20.0-2.0/24"]
+                bastion["<b>EC2</b> bastion<br/>EBS cifrado prd-shield-ebs<br/>IMDSv2 · SSM · sem chave SSH"]
                 nat["NAT Gateway"]
-                bastion["**EC2** bastion<br/>EBS cifrado por CMK<br/>IMDSv2 obrigatório"]
+                igw["Internet Gateway"]
             end
 
-            subgraph app["🔒 Camada de aplicação · 10.20.10-12.0/24 · 3 AZs"]
-                eks["**EKS** eks-prd-shield-us<br/>endpoint privado"]
-                ing["ingress<br/>(strip /api)"]
-                api["shield-api<br/>ClusterIP"]
+            subgraph app["🔒 Aplicação · 10.20.10-12.0/24 · EKS eks-prd-shield-us"]
+                ing["ingress<br/>strip /api<br/>NodePort"]
+                api["shield-api<br/>PostgREST · ClusterIP"]
             end
 
-            subgraph data["🔐 Camada de dados · 10.20.20-22.0/24 · 3 AZs"]
-                rds[("**RDS** Postgres<br/>rds-prd-shield-us<br/>cifrado · privado · backup 7d")]
+            subgraph data["🔐 Dados · 10.20.20-22.0/24 · sem rota default"]
+                rds[("<b>RDS</b> Postgres<br/>rds-prd-shield-us<br/>cifrado prd-shield-rds · privado<br/>backup 7d · deletion protection")]
             end
-        end
-
-        subgraph sec["Controles transversais"]
-            kms["**KMS**<br/>prd-shield-ebs<br/>prd-shield-rds<br/>prd-shield-s3<br/>rotação anual"]
-            iam["**IAM**<br/>eks-cluster · eks-node<br/>bastion · apigw-s3"]
         end
     end
 
     user -->|"GET /"| apigw
     user -->|"GET /api/*"| apigw
-    apigw -->|"assume role-prd-shield-apigw-s3"| s3
+    apigw -->|"role-prd-shield-apigw-s3<br/>s3:GetObject + kms:Decrypt"| s3
     apigw -->|"/api/*"| ing
     ing --> api
-    api -->|"5432 · só do SG do EKS"| rds
-    bastion -.->|"debug"| eks
-    bastion -.->|"debug"| rds
-    app -->|"saída"| nat --> igw
-    kms -.-|"cifra"| s3
-    kms -.-|"cifra"| rds
-    kms -.-|"cifra"| bastion
-    iam -.-|"autoriza"| apigw
-    iam -.-|"autoriza"| eks
+    api -->|"5432 · só pelo SG do EKS"| rds
+    api -.->|"egress"| nat
+    nat --> igw
 
-    classDef edgeC  fill:#fff3e0,stroke:#e8873a,color:#000
-    classDef pubC   fill:#e3f2fd,stroke:#4a80c9,color:#000
-    classDef appC   fill:#e8f5e9,stroke:#3f9c82,color:#000
-    classDef dataC  fill:#fce4ec,stroke:#c2185b,color:#000
-    classDef secC   fill:#f3e5f5,stroke:#7b1fa2,color:#000
+    classDef edgeC fill:#fff3e0,stroke:#e8873a,stroke-width:2px,color:#000
+    classDef pubC  fill:#e3f2fd,stroke:#4a80c9,stroke-width:2px,color:#000
+    classDef appC  fill:#e8f5e9,stroke:#3f9c82,stroke-width:2px,color:#000
+    classDef dataC fill:#fce4ec,stroke:#c2185b,stroke-width:2px,color:#000
     class apigw,s3 edgeC
     class igw,nat,bastion pubC
-    class eks,ing,api appC
+    class ing,api appC
     class rds dataC
-    class kms,iam secC
 ```
+
+</details>
 
 **Por que as camadas são três e não duas.** Separar "app" de "dados" parece
 excesso até o primeiro incidente: se o EKS e o RDS dividem route table e NACL,
@@ -107,6 +97,10 @@ Com uma AZ só, não existe alta disponibilidade — existe uma ilusão dela.
 O pedido central do estudo: servir um frontend estático do S3 **sem tornar o
 bucket público**. O API Gateway é quem tem permissão de ler o bucket; o usuário
 nunca fala com o S3.
+
+![Fluxo S3 + API Gateway](docs/fluxo-s3-apigw.png)
+
+<details><summary>fonte mermaid do diagrama</summary>
 
 ```mermaid
 sequenceDiagram
@@ -137,6 +131,8 @@ sequenceDiagram
     A-->>G: JSON
     G-->>U: 200 · tabela renderizada
 ```
+
+</details>
 
 ### Rotas configuradas
 

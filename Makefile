@@ -3,7 +3,7 @@ LAB   := ./scripts/lab.sh
 
 .DEFAULT_GOAL := help
 .PHONY: help up down logs provision kubeconfig backend frontend seed test flow \
-        url open ui psql ssh status env destroy clean lab
+        url open ui psql ssh status env destroy clean lab diagram
 
 help: ## Lista os alvos disponíveis
 	@echo
@@ -59,6 +59,14 @@ ssh: ## Abre um shell dentro do container do bastion
 
 status: ## Mostra o inventário do ambiente
 	@$(LAB) status
+
+diagram: ## Regenera docs/*.png a partir dos fontes mermaid em docs/*.mmd
+	@for f in docs/*.mmd; do \
+	  echo "  renderizando $$f"; \
+	  docker run --rm -u $$(id -u):$$(id -g) -v "$$PWD/docs:/data" minlag/mermaid-cli \
+	    -i "/data/$$(basename $$f)" -o "/data/$$(basename $$f .mmd).png" -w 2400 -b white >/dev/null; \
+	done
+	@echo "  ok  imagens atualizadas em docs/"
 
 env: ## Imprime os exports para usar aws/kubectl no seu shell
 	@$(LAB) env
