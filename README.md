@@ -8,7 +8,7 @@ Ambiente de estudo para simular cenários de EC2, RDS, EKS e IAM localmente, usa
 
 ![Arquitetura do Shield na AWS](docs/arquitetura.png)
 
-> Fontes em `docs/*.mmd`; `make diagram` regenera os PNGs.
+> Ícones oficiais da AWS via [`diagrams`](https://diagrams.mingrammer.com/). Fonte em `docs/arquitetura_aws.py`; `make diagram` regenera os PNGs.
 >
 > As seções 1 a 3 abaixo são o setup de máquina (WSL2 + Docker), feito uma vez só.
 
@@ -243,7 +243,7 @@ A lista completa, com as divergências de API Gateway, EKS e KMS observadas nos 
 compose.yaml            # emulador (:4566) + console web (:4500)
 env.sh                  # exports do AWS CLI apontando para o emulador
 Makefile                # atalhos: make lab / open / test / clean
-docs/                   # diagramas: fontes .mmd + PNGs (make diagram)
+docs/                   # diagramas: arquitetura_aws.py (ícones AWS) + .mmd + PNGs
 frontend/               # o SPA do Shield publicado no bucket S3
 scripts/
   lab.sh                # orquestrador dos alvos do Makefile

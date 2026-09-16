@@ -60,11 +60,14 @@ ssh: ## Abre um shell dentro do container do bastion
 status: ## Mostra o inventário do ambiente
 	@$(LAB) status
 
-diagram: ## Regenera docs/*.png a partir dos fontes mermaid em docs/*.mmd
+diagram: ## Regenera os PNGs de docs/ (ícones oficiais AWS + mermaid), via container
+	@echo "  arquitetura  (diagrams + ícones oficiais AWS)"
+	@docker run --rm -u $$(id -u):$$(id -g) -v "$$PWD/docs:/work" -w /work \
+	  gtramontina/diagrams:0.23.4 arquitetura_aws.py
 	@for f in docs/*.mmd; do \
-	  echo "  renderizando $$f"; \
+	  echo "  $$(basename $$f .mmd)  (mermaid)"; \
 	  docker run --rm -u $$(id -u):$$(id -g) -v "$$PWD/docs:/data" minlag/mermaid-cli \
-	    -i "/data/$$(basename $$f)" -o "/data/$$(basename $$f .mmd).png" -w 2400 -b white >/dev/null; \
+	    -i "/data/$$(basename $$f)" -o "/data/$$(basename $$f .mmd).png" -w 2200 -b white >/dev/null; \
 	done
 	@echo "  ok  imagens atualizadas em docs/"
 
