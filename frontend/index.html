@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shield · Antifraude</title>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --line:#30363d; --fg:#e6edf3; --dim:#8b949e;
+          --ok:#3fb950; --warn:#d29922; --bad:#f85149; --accent:#58a6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:15px/1.5 ui-sans-serif,-apple-system,"Segoe UI",sans-serif; }
+  header { padding:28px 32px; border-bottom:1px solid var(--line); display:flex;
+           align-items:baseline; gap:14px; flex-wrap:wrap; }
+  h1 { margin:0; font-size:20px; letter-spacing:-.01em; }
+  .tag { font:12px ui-monospace,monospace; color:var(--dim); border:1px solid var(--line);
+         padding:2px 8px; border-radius:999px; }
+  main { padding:24px 32px; max-width:1100px; }
+  .flow { font:12px/1.7 ui-monospace,monospace; color:var(--dim); background:var(--card);
+          border:1px solid var(--line); border-radius:8px; padding:14px 16px; margin-bottom:24px;
+          white-space:pre; overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; background:var(--card);
+          border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  th,td { padding:11px 14px; text-align:left; border-bottom:1px solid var(--line); }
+  th { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--dim);
+       font-weight:600; background:#11161d; }
+  tr:last-child td { border-bottom:none; }
+  td.num { font:13px ui-monospace,monospace; text-align:right; }
+  .pill { font-size:12px; padding:2px 10px; border-radius:999px; font-weight:600; }
+  .aprovada  { background:rgba(63,185,80,.15);  color:var(--ok); }
+  .bloqueada { background:rgba(248,81,73,.15);  color:var(--bad); }
+  .score { font:13px ui-monospace,monospace; }
+  .s-hi { color:var(--bad); } .s-mid { color:var(--warn); } .s-lo { color:var(--ok); }
+  #status { margin-top:18px; font-size:13px; color:var(--dim); }
+  .err { color:var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Shield · Antifraude</h1>
+  <span class="tag" id="env">prd · us-east-1</span>
+  <span class="tag">servido pelo S3 via API Gateway</span>
+</header>
+
+<main>
+  <div class="flow">navegador  →  API Gateway (/)            →  S3   shield-prd-frontend   (esta página)
+navegador  →  API Gateway (/api/transacoes)  →  EKS  shield-api  →  RDS  Postgres (os dados abaixo)</div>
+
+  <table>
+    <thead>
+      <tr><th>#</th><th>Merchant</th><th class="num">Valor</th>
+          <th class="num">Score</th><th>Status</th></tr>
+    </thead>
+    <tbody id="linhas">
+      <tr><td colspan="5" style="color:#8b949e">carregando…</td></tr>
+    </tbody>
+  </table>
+  <p id="status"></p>
+</main>
+
+<script>
+// Caminho relativo de propósito: o frontend não conhece o endereço do backend.
+// Quem roteia /api/* para o cluster EKS é o próprio API Gateway.
+const brl = v => Number(v).toLocaleString('pt-BR', { style:'currency', currency:'BRL' });
+const cls = s => s >= 80 ? 's-hi' : s >= 40 ? 's-mid' : 's-lo';
+
+fetch('api/transacoes?order=score_risco.desc')
+  .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+  .then(rows => {
+    document.getElementById('linhas').innerHTML = rows.map(t => `
+      <tr>
+        <td class="num">${t.id}</td>
+        <td>${t.merchant}</td>
+        <td class="num">${brl(t.valor)}</td>
+        <td class="num score ${cls(t.score_risco)}">${t.score_risco}</td>
+        <td><span class="pill ${t.status}">${t.status}</span></td>
+      </tr>`).join('');
+    document.getElementById('status').textContent =
+      `${rows.length} transações lidas do RDS através do EKS.`;
+  })
+  .catch(e => {
+    document.getElementById('linhas').innerHTML =
+      '<tr><td colspan="5" class="err">falha ao consultar a API</td></tr>';
+    document.getElementById('status').innerHTML =
+      `<span class="err">${e.message}</span> — verifique <code>make test</code>.`;
+  });
+</script>
+</body>
+</html>

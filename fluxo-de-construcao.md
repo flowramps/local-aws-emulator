@@ -1,230 +1,515 @@
-# Cenário de estudo: VPC + EC2 + RDS + EKS no Floci
+# Shield — plataforma antifraude em AWS emulada
 
-Laboratório prático inspirado em perguntas estado de estudo do tipo "scenario-based" sobre AWS (VPC, EC2, IAM). O objetivo é construir, passo a passo, uma arquitetura de duas camadas (subnet pública + privada) e entender **por que** cada peça existe, não só como criá-la.
+Estudo de caso completo: uma aplicação de verdade (frontend + API + banco) sobre uma
+fundação AWS construída com as práticas que uma auditoria esperaria encontrar —
+rede em três camadas e três AZs, KMS por domínio de dado, IAM por função,
+tags em tudo e bucket privado atrás do API Gateway.
 
-> Pré-requisito: Floci rodando via Docker Compose (`http://localhost:4566`) — ver `README.md` de setup do ambiente.
+> Pré-requisito: emulador no ar via Docker Compose — ver `README.md`.
+> O console web sobe junto em **http://localhost:4500**: deixe aberto para ver
+> os recursos aparecendo conforme você executa os passos.
 
-## Arquitetura alvo
+## O produto
 
-```
-                        ┌────────────────────────────┐
-                        │   Você (AWS CLI / kubectl)  │
-                        └──────────────┬─────────────┘
-                                       │ Internet Gateway
-                        ┌──────────────▼─────────────────────────┐
-                        │           VPC 10.0.0.0/16               │
-                        │  (ambiente emulado pelo Floci)          │
-                        │                                          │
-                        │  ┌───────────────────┐ ┌───────────────┐│
-                        │  │ Subnet pública     │ │ Subnet privada││
-                        │  │ 10.0.1.0/24        │ │ 10.0.2.0/24   ││
-                        │  │                    │ │               ││
-                        │  │ • Bastion EC2 (SSH)│ │ • EKS (k3s)   ││
-                        │  │ • NAT Gateway      │ │ • RDS Postgres││
-                        │  │ SG: 22 só do seu IP│ │ SG: só do     ││
-                        │  │                    │ │   Bastion/EKS ││
-                        │  └───────────────────┘ └───────────────┘│
-                        └──────────────────────────────────────────┘
+**Shield** é uma plataforma fictícia de antifraude de pagamentos. O painel lista
+transações com score de risco; os dados vêm de um Postgres na camada privada,
+servidos por uma API dentro do EKS, e a página em si é um objeto num bucket S3
+privado. Nada disso é acessível diretamente: a única porta de entrada é o API Gateway.
+
+```bash
+make lab     # sobe tudo e valida (~3 min do zero)
+make open    # abre o painel do Shield no navegador
 ```
 
-## Fluxo de construção
+---
+
+## Arquitetura
 
 ```mermaid
-flowchart TD
-    A["1. Criar VPC<br/><code>aws ec2 create-vpc</code>"] --> B["2. Subnets + Security Groups<br/><code>create-subnet / create-security-group</code>"]
-    B --> C["3. EC2 Bastion — subnet pública<br/><code>aws ec2 run-instances</code>"]
-    C --> D["4. RDS Postgres — subnet privada<br/><code>aws rds create-db-instance</code>"]
-    D --> E["5. EKS Cluster — subnet privada<br/><code>aws eks create-cluster</code>"]
+flowchart TB
+    user(["👤 Navegador"])
 
-    style A fill:#e8e8e8,stroke:#888
-    style B fill:#e8e8e8,stroke:#888
-    style C fill:#cfe3fb,stroke:#4a80c9
-    style D fill:#cdeae2,stroke:#3f9c82
-    style E fill:#cdeae2,stroke:#3f9c82
+    subgraph aws["☁️ AWS · us-east-1 · conta 000000000000"]
+        direction TB
+
+        subgraph edge["Borda — fora da VPC"]
+            apigw["**API Gateway** REST<br/>api-prd-shield-us · stage prd"]
+            s3[("**S3** shield-prd-frontend-us-east-1<br/>privado · SSE-KMS · versionado<br/>Block Public Access ✓")]
+        end
+
+        subgraph vpc["**VPC** vpc-prd-shield-us · 10.20.0.0/16"]
+            direction TB
+
+            subgraph pub["🌐 Camada pública · 10.20.0-2.0/24 · 3 AZs"]
+                igw["Internet Gateway"]
+                nat["NAT Gateway"]
+                bastion["**EC2** bastion<br/>EBS cifrado por CMK<br/>IMDSv2 obrigatório"]
+            end
+
+            subgraph app["🔒 Camada de aplicação · 10.20.10-12.0/24 · 3 AZs"]
+                eks["**EKS** eks-prd-shield-us<br/>endpoint privado"]
+                ing["ingress<br/>(strip /api)"]
+                api["shield-api<br/>ClusterIP"]
+            end
+
+            subgraph data["🔐 Camada de dados · 10.20.20-22.0/24 · 3 AZs"]
+                rds[("**RDS** Postgres<br/>rds-prd-shield-us<br/>cifrado · privado · backup 7d")]
+            end
+        end
+
+        subgraph sec["Controles transversais"]
+            kms["**KMS**<br/>prd-shield-ebs<br/>prd-shield-rds<br/>prd-shield-s3<br/>rotação anual"]
+            iam["**IAM**<br/>eks-cluster · eks-node<br/>bastion · apigw-s3"]
+        end
+    end
+
+    user -->|"GET /"| apigw
+    user -->|"GET /api/*"| apigw
+    apigw -->|"assume role-prd-shield-apigw-s3"| s3
+    apigw -->|"/api/*"| ing
+    ing --> api
+    api -->|"5432 · só do SG do EKS"| rds
+    bastion -.->|"debug"| eks
+    bastion -.->|"debug"| rds
+    app -->|"saída"| nat --> igw
+    kms -.-|"cifra"| s3
+    kms -.-|"cifra"| rds
+    kms -.-|"cifra"| bastion
+    iam -.-|"autoriza"| apigw
+    iam -.-|"autoriza"| eks
+
+    classDef edgeC  fill:#fff3e0,stroke:#e8873a,color:#000
+    classDef pubC   fill:#e3f2fd,stroke:#4a80c9,color:#000
+    classDef appC   fill:#e8f5e9,stroke:#3f9c82,color:#000
+    classDef dataC  fill:#fce4ec,stroke:#c2185b,color:#000
+    classDef secC   fill:#f3e5f5,stroke:#7b1fa2,color:#000
+    class apigw,s3 edgeC
+    class igw,nat,bastion pubC
+    class eks,ing,api appC
+    class rds dataC
+    class kms,iam secC
 ```
 
-**Por que essa ordem importa:** cada recurso depende do anterior existir primeiro (subnet precisa de VPC, instância precisa de subnet + SG, RDS/EKS precisam do SG restrito criado no passo 2). É a mesma lógica de dependência que a AWS real exige via CloudFormation/Terraform.
+**Por que as camadas são três e não duas.** Separar "app" de "dados" parece
+excesso até o primeiro incidente: se o EKS e o RDS dividem route table e NACL,
+um pod comprometido tem o mesmo caminho de rede que a aplicação legítima. Com a
+camada de dados isolada — **sem rota default nenhuma** — o banco não alcança a
+internet nem para baixar pacote, e qualquer exfiltração precisa passar pela
+camada de aplicação, onde há log e controle.
+
+**Por que três AZs.** RDS e EKS exigem subnets em múltiplas AZs para failover.
+Com uma AZ só, não existe alta disponibilidade — existe uma ilusão dela.
 
 ---
 
-## Receita: subindo o ambiente
+## O fluxo da integração S3 + API Gateway
 
-### 0. Variáveis de ambiente
+O pedido central do estudo: servir um frontend estático do S3 **sem tornar o
+bucket público**. O API Gateway é quem tem permissão de ler o bucket; o usuário
+nunca fala com o S3.
 
-```bash
-export AWS_ENDPOINT_URL=http://localhost:4566
-export AWS_DEFAULT_REGION=us-east-1
-export AWS_ACCESS_KEY_ID=test
-export AWS_SECRET_ACCESS_KEY=test
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as 👤 Navegador
+    participant G as API Gateway<br/>(stage prd)
+    participant R as IAM<br/>role-prd-shield-apigw-s3
+    participant S as S3<br/>bucket privado
+    participant N as Ingress (EKS)
+    participant A as shield-api<br/>(PostgREST)
+    participant D as RDS Postgres
+
+    U->>G: GET /
+    G->>R: sts:AssumeRole
+    R-->>G: credencial temporária
+    G->>S: GET index.html (SigV4 + kms:Decrypt)
+    S-->>G: HTML (decifrado com a CMK)
+    G-->>U: 200 · painel do Shield
+
+    Note over U: a página executa fetch('api/transacoes')
+
+    U->>G: GET /api/transacoes
+    G->>N: encaminha para o NodePort do cluster
+    N->>A: /transacoes (prefixo /api removido)
+    A->>D: SELECT ... FROM api.transacoes
+    Note right of D: conexão aceita só porque a origem<br/>é o SG do EKS — não há regra por CIDR
+    D-->>A: linhas
+    A-->>G: JSON
+    G-->>U: 200 · tabela renderizada
 ```
 
-### 1. Criar a VPC
+### Rotas configuradas
+
+| Método | Caminho | Integração | Destino |
+|---|---|---|---|
+| `GET` | `/` | `HTTP_PROXY` | `s3://shield-prd-frontend-us-east-1/index.html` |
+| `ANY` | `/api/{proxy+}` | `HTTP_PROXY` | ingress do EKS → `shield-api` |
+| `ANY` | `/{proxy+}` | `HTTP_PROXY` | `s3://shield-prd-frontend-us-east-1/{proxy}` |
+
+A ordem importa: `/api/{proxy+}` é mais específica que `/{proxy+}` e por isso
+vence o roteamento. Se fosse o contrário, toda chamada de API voltaria como HTML
+do bucket. O `make test` verifica exatamente isso.
+
+### O que mantém o bucket fechado
+
+| Controle | Efeito |
+|---|---|
+| Block Public Access (4 flags) | Nenhum objeto vira público, nem por ACL nem por policy |
+| ACL `private` | Sem concessão a `AllUsers` / `AuthenticatedUsers` |
+| Bucket policy | `s3:GetObject` só para `role-prd-shield-apigw-s3` |
+| Bucket policy (deny) | Nega qualquer operação com `aws:SecureTransport=false` |
+| SSE-KMS + Bucket Key | Cifrado com a CMK do time; ler exige `kms:Decrypt` |
+| Versionamento | Deploy ruim do frontend se desfaz sem restore |
+
+Repare que a role do API Gateway precisa de **duas** permissões: `s3:GetObject`
+*e* `kms:Decrypt` na chave. Esquecer a segunda é o erro mais comum nesse
+desenho — o objeto existe, a policy do bucket permite, e mesmo assim vem
+`AccessDenied`.
+
+---
+
+## Convenção de nomes e tags
+
+Todo recurso segue `<tipo>-<ambiente>-<produto>-<escopo>`:
+
+```
+vpc-prd-shield-us              eks-prd-shield-us          rds-prd-shield-us
+snet-prd-shield-app-a          sg-prd-shield-rds          alias/prd-shield-s3
+role-prd-shield-apigw-s3       api-prd-shield-us          shield-prd-frontend-us-east-1
+```
+
+E toda peça carrega as mesmas seis tags, o que sustenta billing por centro de
+custo, inventário e políticas de acesso baseadas em tag:
+
+```
+Name · Environment=prd · Project=shield · Owner=squad-pagamentos
+CostCenter=CC-4471 · Compliance=pci-dss · ManagedBy=floci-lab
+```
+
+As subnets ganham ainda `kubernetes.io/role/elb` (pública) e
+`kubernetes.io/role/internal-elb` (app) — é por essas tags que o EKS descobre
+onde criar load balancers.
+
+---
+
+## Receita manual
+
+O `make provision` executa exatamente esta sequência. Vale percorrer à mão pelo
+menos uma vez: é ela que ensina o *porquê* de cada peça.
 
 ```bash
-VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 --query 'Vpc.VpcId' --output text)
-echo "VPC criada: $VPC_ID"
+eval "$(make -s env)"    # endpoint + credenciais + KUBECONFIG isolado
+```
+
+### 1. KMS — uma chave por domínio de dado
+
+Uma CMK só para tudo é cômodo e errado: quem pode decifrar o backup do banco
+passa a poder decifrar o frontend. Chaves separadas permitem policies separadas.
+
+```bash
+for dominio in ebs rds s3; do
+  KID=$(aws kms create-key --description "Shield $dominio" \
+        --tags TagKey=Name,TagValue=prd-shield-$dominio TagKey=Project,TagValue=shield \
+        --query 'KeyMetadata.KeyId' --output text)
+  aws kms create-alias --alias-name alias/prd-shield-$dominio --target-key-id $KID
+  aws kms enable-key-rotation --key-id $KID       # rotação anual: CIS / PCI-DSS
+done
+```
+
+> O KMS usa `TagKey=`/`TagValue=`, não `Key=`/`Value=` como o resto da CLI.
+
+Criptografia de EBS ligada por padrão **na conta**, apontando para a chave do time:
+
+```bash
+EBS_KEY=$(aws kms describe-key --key-id alias/prd-shield-ebs --query 'KeyMetadata.Arn' --output text)
+aws ec2 enable-ebs-encryption-by-default
+aws ec2 modify-ebs-default-kms-key-id --kms-key-id $EBS_KEY
 ```
 
 **Teste:**
 ```bash
-aws ec2 describe-vpcs --vpc-ids $VPC_ID
+aws ec2 get-ebs-encryption-by-default
+aws ec2 get-ebs-default-kms-key-id
+aws kms get-key-rotation-status --key-id alias/prd-shield-rds
 ```
 
-### 2. Criar subnets e security groups
+### 2. IAM — uma role por função
 
 ```bash
-# Subnet pública (bastion)
-PUB_SUBNET=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.1.0/24 \
-  --availability-zone us-east-1a --query 'Subnet.SubnetId' --output text)
+aws iam create-role --role-name role-prd-shield-apigw-s3 \
+  --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{
+    "Effect":"Allow","Principal":{"Service":"apigateway.amazonaws.com"},
+    "Action":"sts:AssumeRole"}]}'
 
-# Subnet privada (RDS + EKS)
-PRIV_SUBNET=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.2.0/24 \
-  --availability-zone us-east-1a --query 'Subnet.SubnetId' --output text)
-
-# SG do bastion: só SSH de fora
-BASTION_SG=$(aws ec2 create-security-group --group-name bastion-sg \
-  --description "bastion" --vpc-id $VPC_ID --query 'GroupId' --output text)
-aws ec2 authorize-security-group-ingress --group-id $BASTION_SG \
-  --protocol tcp --port 22 --cidr 0.0.0.0/0
-
-# SG da subnet privada: só aceita tráfego vindo do bastion
-PRIVATE_SG=$(aws ec2 create-security-group --group-name private-sg \
-  --description "private" --vpc-id $VPC_ID --query 'GroupId' --output text)
-aws ec2 authorize-security-group-ingress --group-id $PRIVATE_SG \
-  --protocol tcp --port 22 --source-group $BASTION_SG
-
-echo "Subnet pública: $PUB_SUBNET | Subnet privada: $PRIV_SUBNET"
-echo "SG bastion: $BASTION_SG | SG privado: $PRIVATE_SG"
+# permissão mínima: ler o bucket do frontend e decifrar com a CMK daquele bucket
+aws iam put-role-policy --role-name role-prd-shield-apigw-s3 \
+  --policy-name apigw-frontend-read --policy-document "{
+    \"Version\":\"2012-10-17\",\"Statement\":[
+      {\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\"],
+       \"Resource\":\"arn:aws:s3:::shield-prd-frontend-us-east-1/*\"},
+      {\"Effect\":\"Allow\",\"Action\":[\"kms:Decrypt\"],\"Resource\":\"$S3_KEY\"}]}"
 ```
+
+O bastion não recebe chave SSH: o acesso é por Session Manager, que deixa
+rastro no CloudTrail e dispensa porta 22 aberta.
 
 **Teste:**
 ```bash
-aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID"
-aws ec2 describe-security-groups --group-ids $BASTION_SG $PRIVATE_SG
+aws iam get-role-policy --role-name role-prd-shield-apigw-s3 --policy-name apigw-frontend-read
+aws iam get-instance-profile --instance-profile-name instprof-prd-shield-bastion
 ```
 
-### 3. Lançar o EC2 bastion
+### 3. Rede — 3 AZs × 3 camadas
 
 ```bash
-INSTANCE_ID=$(aws ec2 run-instances --image-id ami-00000001 --count 1 \
-  --instance-type t3.micro --subnet-id $PUB_SUBNET \
-  --security-group-ids $BASTION_SG \
-  --query 'Instances[0].InstanceId' --output text)
+VPC_ID=$(aws ec2 create-vpc --cidr-block 10.20.0.0/16 \
+  --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=vpc-prd-shield-us},{Key=Project,Value=shield}]' \
+  --query 'Vpc.VpcId' --output text)
+aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-hostnames
 
-echo "Instância bastion: $INSTANCE_ID"
+# 9 subnets: 3 camadas × 3 AZs (ver scripts/lib/net.sh para o laço completo)
+aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.20.0.0/24  --availability-zone us-east-1a \
+  --tag-specifications 'ResourceType=subnet,Tags=[{Key=Name,Value=snet-prd-shield-pub-a},{Key=kubernetes.io/role/elb,Value=1}]'
 ```
+
+Três route tables com propósitos distintos:
+
+```bash
+# pública  → Internet Gateway
+aws ec2 create-route --route-table-id $RTB_PUBLIC  --destination-cidr-block 0.0.0.0/0 --gateway-id $IGW_ID
+# app      → NAT Gateway (sai, mas não recebe)
+aws ec2 create-route --route-table-id $RTB_PRIVATE --destination-cidr-block 0.0.0.0/0 --nat-gateway-id $NAT_ID
+# dados    → nenhuma rota default, de propósito
+```
+
+Security groups liberando **por identidade**, nunca por CIDR:
+
+```bash
+aws ec2 authorize-security-group-ingress --group-id $SG_RDS \
+  --protocol tcp --port 5432 --source-group $SG_EKS
+```
+
+`--source-group` sobrevive a mudança de CIDR, a novo node, a re-escalonamento de
+pod. Uma regra `--cidr 10.20.10.0/24` quebra no dia em que a subnet muda — e,
+pior, libera qualquer coisa que venha a ocupar aquele range.
 
 **Teste:**
 ```bash
-aws ec2 describe-instances --instance-ids $INSTANCE_ID \
-  --query 'Reservations[0].Instances[0].[State.Name,SubnetId,SecurityGroups]'
+aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query 'length(Subnets)'   # 9
+aws ec2 describe-route-tables --route-table-ids $RTB_DATA \
+  --query "length(RouteTables[0].Routes[?DestinationCidrBlock=='0.0.0.0/0'])"               # 0
+aws ec2 describe-security-groups --group-ids $SG_RDS \
+  --query "length(SecurityGroups[0].IpPermissions[?length(IpRanges)>\`0\`])"                # 0
 ```
 
-### 4. Criar o RDS Postgres (container Docker real por trás)
+### 4. EC2 bastion com volume cifrado
 
 ```bash
-aws rds create-db-instance \
-  --db-instance-identifier meu-banco \
-  --db-instance-class db.t3.micro \
-  --engine postgres \
-  --master-username admin --master-user-password senha123 \
-  --allocated-storage 20 \
-  --vpc-security-group-ids $PRIVATE_SG
+aws ec2 run-instances --image-id ami-00000001 --instance-type t3.micro --count 1 \
+  --subnet-id $SUBNET_PUB_A --security-group-ids $SG_BASTION \
+  --iam-instance-profile Name=instprof-prd-shield-bastion \
+  --block-device-mappings "[{\"DeviceName\":\"/dev/xvda\",\"Ebs\":{
+      \"VolumeSize\":20,\"VolumeType\":\"gp3\",\"Encrypted\":true,\"KmsKeyId\":\"$EBS_KEY\"}}]" \
+  --metadata-options HttpTokens=required,HttpEndpoint=enabled \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=ec2-prd-shield-bastion-1a}]'
 ```
 
-**Teste — confirme que existe um container Docker real rodando:**
-```bash
-docker ps | grep postgres
+`HttpTokens=required` força IMDSv2 — é o que impede que um SSRF na aplicação
+leia as credenciais da instância pelo metadata service.
 
-aws rds describe-db-instances --db-instance-identifier meu-banco \
-  --query 'DBInstances[0].[DBInstanceStatus,Endpoint]'
+### 5. RDS na camada de dados
+
+```bash
+aws rds create-db-subnet-group --db-subnet-group-name dbsng-prd-shield-us \
+  --db-subnet-group-description "Camada de dados do Shield" \
+  --subnet-ids $SUBNET_DATA_A $SUBNET_DATA_B $SUBNET_DATA_C
+
+aws rds create-db-instance --db-instance-identifier rds-prd-shield-us \
+  --db-instance-class db.t3.micro --engine postgres --db-name shielddb \
+  --master-username shield_app --master-user-password '...' \
+  --allocated-storage 20 --storage-type gp3 \
+  --storage-encrypted --kms-key-id $RDS_KEY \
+  --db-subnet-group-name dbsng-prd-shield-us \
+  --vpc-security-group-ids $SG_RDS \
+  --no-publicly-accessible --backup-retention-period 7 \
+  --copy-tags-to-snapshot --deletion-protection
 ```
 
-Conecte diretamente para validar (já que é Postgres de verdade):
-```bash
-ENDPOINT=$(aws rds describe-db-instances --db-instance-identifier meu-banco \
-  --query 'DBInstances[0].Endpoint.Address' --output text)
-PORT=$(aws rds describe-db-instances --db-instance-identifier meu-banco \
-  --query 'DBInstances[0].Endpoint.Port' --output text)
+**Sem o `--db-subnet-group-name` o RDS cai no grupo default da VPC default** e
+todo o desenho de rede vira decoração. É o erro silencioso mais caro desta lista.
 
-psql "host=$ENDPOINT port=$PORT user=admin dbname=postgres" -c "SELECT version();"
+**Teste:**
+```bash
+aws rds describe-db-instances --db-instance-identifier rds-prd-shield-us \
+  --query 'DBInstances[0].[StorageEncrypted,PubliclyAccessible,DBSubnetGroup.DBSubnetGroupName]'
 ```
 
-### 5. Criar o cluster EKS (k3s real por trás)
+### 6. EKS nas subnets de aplicação
 
 ```bash
-aws eks create-cluster --name meu-cluster \
-  --role-arn arn:aws:iam::000000000000:role/eks-role \
-  --resources-vpc-config subnetIds=$PRIV_SUBNET
+aws eks create-cluster --name eks-prd-shield-us \
+  --role-arn arn:aws:iam::000000000000:role/role-prd-shield-eks-cluster \
+  --kubernetes-version 1.31 \
+  --resources-vpc-config "subnetIds=$APP_A,$APP_B,$APP_C,securityGroupIds=$SG_EKS,endpointPublicAccess=false,endpointPrivateAccess=true" \
+  --encryption-config 'resources=secrets,provider={keyArn='$EBS_KEY'}' \
+  --tags Name=eks-prd-shield-us,Project=shield,CostCenter=CC-4471
 ```
 
-**Teste — aguarde o cluster ficar ativo e configure o kubectl:**
+Configure o `kubectl` — **não use `aws eks update-kubeconfig`**, ver
+[Limitações](#limitações-do-emulador):
+
 ```bash
-aws eks describe-cluster --name meu-cluster --query 'cluster.status'
-
-aws eks update-kubeconfig --name meu-cluster --region us-east-1
-
+docker exec floci-eks-eks-prd-shield-us cat /etc/rancher/k3s/k3s.yaml > .lab/kubeconfig
+sed -i "s|https://127.0.0.1:6443|https://localhost:$(docker port floci-eks-eks-prd-shield-us 6443/tcp | cut -d: -f2)|" .lab/kubeconfig
+export KUBECONFIG=$PWD/.lab/kubeconfig
 kubectl get nodes
-kubectl get pods -A
 ```
 
-**Teste — confirme que existe um container k3s real rodando:**
+### 7. Bucket privado do frontend
+
 ```bash
-docker ps | grep k3s
+aws s3api create-bucket --bucket shield-prd-frontend-us-east-1
+
+aws s3api put-bucket-encryption --bucket shield-prd-frontend-us-east-1 \
+  --server-side-encryption-configuration "{\"Rules\":[{
+    \"ApplyServerSideEncryptionByDefault\":{\"SSEAlgorithm\":\"aws:kms\",\"KMSMasterKeyID\":\"$S3_KEY\"},
+    \"BucketKeyEnabled\":true}]}"
+
+aws s3api put-bucket-ownership-controls --bucket shield-prd-frontend-us-east-1 \
+  --ownership-controls 'Rules=[{ObjectOwnership=BucketOwnerPreferred}]'
+aws s3api put-bucket-acl --bucket shield-prd-frontend-us-east-1 --acl private
+
+aws s3api put-public-access-block --bucket shield-prd-frontend-us-east-1 \
+  --public-access-block-configuration \
+    BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+
+aws s3api put-bucket-versioning --bucket shield-prd-frontend-us-east-1 \
+  --versioning-configuration Status=Enabled
+
+aws s3api put-object --bucket shield-prd-frontend-us-east-1 \
+  --key index.html --body frontend/index.html \
+  --content-type "text/html; charset=utf-8" --acl private
 ```
+
+> **ACL vs. policy.** Com `ObjectOwnership=BucketOwnerEnforced` as ACLs ficam
+> desativadas e o acesso passa a ser só por policy — é a recomendação atual da
+> AWS. Aqui usamos `BucketOwnerPreferred` justamente para a ACL continuar
+> existindo e poder ser inspecionada (`get-bucket-acl`) no laboratório.
+
+**Teste:**
+```bash
+aws s3api get-public-access-block --bucket shield-prd-frontend-us-east-1
+aws s3api get-bucket-acl --bucket shield-prd-frontend-us-east-1 \
+  --query "Grants[?Grantee.URI!=null]"     # deve vir vazio
+```
+
+### 8. API Gateway como porta única
+
+```bash
+API=$(aws apigateway create-rest-api --name api-prd-shield-us --query id --output text)
+ROOT=$(aws apigateway get-resources --rest-api-id $API --query "items[?path=='/'].id|[0]" --output text)
+
+# GET / -> index.html do bucket
+aws apigateway put-method --rest-api-id $API --resource-id $ROOT --http-method GET --authorization-type NONE
+aws apigateway put-integration --rest-api-id $API --resource-id $ROOT --http-method GET \
+  --type HTTP_PROXY --integration-http-method GET \
+  --uri "http://floci:4566/shield-prd-frontend-us-east-1/index.html"
+
+# ANY /api/{proxy+} -> ingress do EKS  (declarar ANTES do catch-all)
+R_API=$(aws apigateway create-resource --rest-api-id $API --parent-id $ROOT --path-part api --query id --output text)
+R_PX=$(aws apigateway create-resource --rest-api-id $API --parent-id $R_API --path-part '{proxy+}' --query id --output text)
+aws apigateway put-method --rest-api-id $API --resource-id $R_PX --http-method ANY \
+  --authorization-type NONE --request-parameters 'method.request.path.proxy=true'
+aws apigateway put-integration --rest-api-id $API --resource-id $R_PX --http-method ANY \
+  --type HTTP_PROXY --integration-http-method ANY \
+  --uri "http://floci-eks-eks-prd-shield-us:30300/{proxy}" \
+  --request-parameters 'integration.request.path.proxy=method.request.path.proxy'
+
+aws apigateway create-deployment --rest-api-id $API --stage-name prd
+```
+
+**Teste — o fluxo inteiro:**
+```bash
+BASE=http://localhost:4566/restapis/$API/prd/_user_request_
+curl -s $BASE/                    | head -3      # HTML do S3
+curl -s $BASE/api/transacoes      | head -3      # JSON do RDS, via EKS
+curl -s "$BASE/api/transacoes?status=eq.bloqueada&select=merchant"
+```
+
+Equivalente pronto: `make flow`.
 
 ---
 
-## Cenário de teste ponta a ponta
+## Comandos do dia a dia
 
-Depois que tudo estiver de pé, valide o fluxo completo: um pod dentro do EKS conseguindo falar com o RDS pela rede privada.
-
-```bash
-kubectl run pg-test --rm -it --image=postgres:16-alpine --restart=Never -- \
-  psql "host=$ENDPOINT port=$PORT user=admin dbname=postgres" -c "SELECT 1;"
-```
-
-Se retornar `1`, o fluxo completo (EKS → SG → RDS) está funcionando de ponta a ponta.
-
----
-
-## Perguntas estado de estudo mapeadas a cada etapa
-
-**Sobre a VPC (etapa 1)**
-- Por que segmentar em subnet pública e privada em vez de uma única subnet?
-- O que acontece com os recursos se a VPC for deletada?
-
-**Sobre subnets e security groups (etapa 2)**
-- Qual a diferença entre Security Group e NACL, e onde cada um atuaria aqui?
-- Por que usar `--source-group` em vez de liberar por CIDR no SG privado?
-
-**Sobre o EC2 bastion (etapa 3)**
-- Por que o bastion fica na subnet pública e os demais recursos não?
-- Como você reduziria a superfície de ataque desse bastion (ex.: restringir `0.0.0.0/0` para o CIDR do seu escritório)?
-
-**Sobre o RDS (etapa 4)**
-- Por que o RDS não deveria ter IP público em um cenário real?
-- O que muda se você remover a rota padrão (`0.0.0.0/0`) da tabela de rotas da subnet privada?
-
-**Sobre o EKS (etapa 5)**
-- Como o EKS autenticaria no RDS sem hardcodar senha no manifesto (dica: IAM Role for Service Accounts / IRSA)?
-- O que aconteceria com os pods se a subnet privada perdesse a rota para um NAT Gateway?
+| Alvo | O que faz |
+|---|---|
+| `make lab` | Sobe, provisiona e valida tudo (~3 min do zero) |
+| `make open` / `make url` | Abre / imprime a URL da aplicação |
+| `make ui` | Console web do emulador (http://localhost:4500) |
+| `make test` | 50+ validações: KMS, IAM, rede, tags, ACL e fluxo |
+| `make flow` | Só o teste ponta a ponta |
+| `make psql` | Shell psql no RDS |
+| `make seed` | Recria schema e dados de exemplo |
+| `make backend` / `make frontend` | Reimplanta uma camada só |
+| `make status` | Inventário do ambiente |
+| `make destroy` / `make clean` | Remove recursos / derruba tudo |
 
 ---
 
-## Limpeza do ambiente
+## Perguntas de estudo mapeadas a cada etapa
 
-```bash
-aws eks delete-cluster --name meu-cluster
-aws rds delete-db-instance --db-instance-identifier meu-banco --skip-final-snapshot
-aws ec2 terminate-instances --instance-ids $INSTANCE_ID
-aws ec2 delete-security-group --group-id $PRIVATE_SG
-aws ec2 delete-security-group --group-id $BASTION_SG
-aws ec2 delete-subnet --subnet-id $PRIV_SUBNET
-aws ec2 delete-subnet --subnet-id $PUB_SUBNET
-aws ec2 delete-vpc --vpc-id $VPC_ID
-```
+**KMS (etapa 1)**
+- Por que uma CMK por domínio em vez de uma chave só para a conta inteira?
+- O que acontece com os snapshots existentes quando você troca a chave padrão de EBS?
+- Por que a role do API Gateway precisa de `kms:Decrypt` além de `s3:GetObject`?
 
-## Ressalva importante
+**IAM (etapa 2)**
+- Qual a diferença entre policy inline e managed, e quando cada uma é preferível?
+- Como o pod do EKS acessaria o Secrets Manager sem credencial estática? (IRSA)
+- Por que instance profile em vez de gravar uma access key na instância?
 
-VPC, subnets e route tables no Floci funcionam como objetos de control-plane (a API responde no formato certo), mas o isolamento de rede real entre eles pode não replicar 100% o roteamento de uma VPC AWS de verdade. RDS e EKS, por outro lado, sobem containers Docker reais (Postgres e k3s), então o comportamento desses dois é fiel ao mundo real. Em  estado de estudo, é mais seguro dizer "simulei esse fluxo localmente e entendo o porquê de cada peça" do que assumir paridade total de rede.
+**Rede (etapa 3)**
+- Por que `--source-group` em vez de `--cidr` no SG do banco?
+- O que muda no blast radius se a camada de dados tiver rota para o NAT?
+- Onde uma NACL atuaria que o security group não atua?
+- Este laboratório tem **um** NAT Gateway. O que quebra quando a AZ dele cai?
+
+**EC2 (etapa 4)**
+- Como `HttpTokens=required` (IMDSv2) bloqueia a exploração de um SSRF?
+- Por que o bastion não tem chave SSH neste desenho?
+
+**RDS (etapa 5)**
+- O que acontece se o `--db-subnet-group-name` for omitido?
+- Por que `--deletion-protection` e `--copy-tags-to-snapshot` importam em produção?
+
+**EKS (etapa 6)**
+- Para que servem as tags `kubernetes.io/role/elb` nas subnets?
+- Por que `endpointPublicAccess=false` muda o modelo de acesso do time?
+
+**S3 + API Gateway (etapas 7 e 8)**
+- Por que servir o frontend pelo API Gateway em vez de deixar o bucket público?
+- Em produção real, o que CloudFront + OAC resolveria melhor que este desenho?
+- Como a ordem de declaração das rotas afeta `/api/*` vs. `/{proxy+}`?
+
+---
+
+## Limitações do emulador
+
+O laboratório existe para treinar raciocínio de arquitetura, não para provar
+paridade com a AWS. Estas divergências foram observadas e testadas aqui:
+
+| Área | Divergência |
+|---|---|
+| **Isolamento de rede** | Subnets, route tables e SGs são objetos de control-plane. Todos os containers ficam na mesma bridge do Docker: o pod alcança o RDS pela rede plana, **não** porque o SG permitiu. |
+| **Bucket policy / BPA** | O objeto continua legível anonimamente em `http://localhost:4566/<bucket>/<key>`, apesar de Block Public Access e da policy restritiva. O `make test` reporta isso como aviso, não como falha. |
+| **API Gateway `--type AWS`** | A integração nativa com S3 (`arn:aws:apigateway:...:s3:path/...`) não é implementada — responde `MissingAction`. Por isso o laboratório usa `HTTP_PROXY`. |
+| **API Gateway `--credentials`** | Aceito na chamada, mas não persistido: `get-integration` devolve `null`. A role existe e é testável, mas não é ela que autentica a leitura do bucket aqui. |
+| **API Gateway `{proxy}` aninhado** | Em `/api/{proxy+}`, o Floci substitui `{proxy}` pelo caminho **completo** (`api/transacoes`), não pelo trecho após o prefixo como a AWS faz. O ingress no cluster remove o prefixo, o que faz a rota funcionar igual nos dois mundos. |
+| **EKS `--encryption-config`** | Aceito, mas `describe-cluster` devolve `encryptionConfig: null`. A criptografia de secrets do etcd não é emulada. |
+| **`aws eks update-kubeconfig`** | Gera um contexto que não autentica no k3s (401) e ainda troca o seu `current-context`. Use o kubeconfig interno do k3s. |
+| **Containers reais** | EC2, RDS e EKS sobem containers de verdade (sshd, Postgres, k3s) — o comportamento de processo é fiel; a topologia de rede entre eles, não. |
+
+Em conversa de estudo, a formulação honesta é: *"simulei esse fluxo localmente,
+entendo o porquê de cada controle e sei quais deles o emulador não chega a
+aplicar de fato"*.

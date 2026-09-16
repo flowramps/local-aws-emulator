@@ -5,3 +5,22 @@ services:
       - "4566:4566"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+
+  # Console web (estilo AWS Console) para inspecionar os recursos do emulador.
+  # A imagem publicada já traz o backend compilado junto, então UI e API ficam
+  # ambas na 4500 — diferente do build de fonte, que separa a API na 4501.
+  floci-ui:
+    image: floci/floci-ui:latest
+    ports:
+      - "4500:4500"
+    environment:
+      # Resolvido de dentro do container: precisa ser o nome do serviço, não
+      # localhost (que apontaria para o próprio container da UI).
+      FLOCI_ENDPOINT: http://floci:4566
+      AWS_REGION: us-east-1
+      # Credenciais fictícias do laboratório — as mesmas do env.sh.
+      AWS_ACCESS_KEY_ID: AKIALOCALSHIELD00000
+      AWS_SECRET_ACCESS_KEY: shield-local-only-not-a-real-secret
+    depends_on:
+      floci:
+        condition: service_healthy
