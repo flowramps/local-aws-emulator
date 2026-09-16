@@ -1,6 +1,6 @@
 # Cenário de estudo: VPC + EC2 + RDS + EKS no Floci
 
-Laboratório prático inspirado em perguntas de entrevista do tipo "scenario-based" sobre AWS (VPC, EC2, IAM). O objetivo é construir, passo a passo, uma arquitetura de duas camadas (subnet pública + privada) e entender **por que** cada peça existe, não só como criá-la.
+Laboratório prático inspirado em perguntas estado de estudo do tipo "scenario-based" sobre AWS (VPC, EC2, IAM). O objetivo é construir, passo a passo, uma arquitetura de duas camadas (subnet pública + privada) e entender **por que** cada peça existe, não só como criá-la.
 
 > Pré-requisito: Floci rodando via Docker Compose (`http://localhost:4566`) — ver `README.md` de setup do ambiente.
 
@@ -188,7 +188,7 @@ Se retornar `1`, o fluxo completo (EKS → SG → RDS) está funcionando de pont
 
 ---
 
-## Perguntas de entrevista mapeadas a cada etapa
+## Perguntas estado de estudo mapeadas a cada etapa
 
 **Sobre a VPC (etapa 1)**
 - Por que segmentar em subnet pública e privada em vez de uma única subnet?
@@ -227,4 +227,4 @@ aws ec2 delete-vpc --vpc-id $VPC_ID
 
 ## Ressalva importante
 
-VPC, subnets e route tables no Floci funcionam como objetos de control-plane (a API responde no formato certo), mas o isolamento de rede real entre eles pode não replicar 100% o roteamento de uma VPC AWS de verdade. RDS e EKS, por outro lado, sobem containers Docker reais (Postgres e k3s), então o comportamento desses dois é fiel ao mundo real. Em uma entrevista, é mais seguro dizer "simulei esse fluxo localmente e entendo o porquê de cada peça" do que assumir paridade total de rede.
+VPC, subnets e route tables no Floci funcionam como objetos de control-plane (a API responde no formato certo), mas o isolamento de rede real entre eles pode não replicar 100% o roteamento de uma VPC AWS de verdade. RDS e EKS, por outro lado, sobem containers Docker reais (Postgres e k3s), então o comportamento desses dois é fiel ao mundo real. Em  estado de estudo, é mais seguro dizer "simulei esse fluxo localmente e entendo o porquê de cada peça" do que assumir paridade total de rede.
